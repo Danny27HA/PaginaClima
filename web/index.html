@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>CDMX Flood — Mapa</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+  <style>
+    html, body, #map { height: 100%; margin: 0; }
+    .legend { background: white; padding: 8px 10px; line-height: 1.4; }
+    .legend .swatch { display:inline-block; width:12px; height:12px; margin-right:6px; }
+
+    /* Chat */
+    #chat { position:absolute; right:10px; top:10px; width:360px; height:80%;
+            background:#fff; border-radius:12px; box-shadow:0 4px 18px rgba(0,0,0,.15);
+            display:flex; flex-direction:column; overflow:hidden; z-index:1000; }
+    #chat header { padding:10px 12px; border-bottom:1px solid #eee; font-weight:600; }
+    #chatlog { flex:1; padding:12px; overflow:auto; font-size:14px; background:#fafafa; }
+
+    .msg { max-width:85%; margin:8px 0; padding:10px 12px; border-radius:12px; line-height:1.35; }
+    .msg.me { margin-left:auto; background:#e6f0ff; border:1px solid #cfe0ff; }
+    .msg.ai { margin-right:auto; background:#ffffff; border:1px solid #eee; }
+
+    .row { display:flex; gap:8px; padding:10px; border-top:1px solid #eee; background:#fff; }
+    .row input { flex:1; padding:9px 10px; border:1px solid #ddd; border-radius:8px; }
+    .row button { padding:9px 12px; border:none; background:#2a7ade; color:#fff; border-radius:8px; cursor:pointer; }
+    .row button[disabled] { opacity:.7; cursor:default; }
+
+    /* Indicador “escribiendo…” */
+    .typing { display:flex; align-items:center; gap:6px; color:#666; }
+    .dot { width:6px; height:6px; border-radius:50%; background:#bbb; animation:blink 1.2s infinite ease-in-out; }
+    .dot:nth-child(2){ animation-delay:.2s } .dot:nth-child(3){ animation-delay:.4s }
+    @keyframes blink { 0%,80%,100%{opacity:.2} 40%{opacity:1} }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <!-- Chat (un solo bloque) -->
+  <div id="chat">
+    <header>Asistente de Inundaciones (72h)</header>
+    <div id="chatlog"></div>
+    <div class="row">
+      <input id="chatmsg" placeholder="Pregúntame algo...">
+      <button id="chatsend">Enviar</button>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script>
+    const API = "http://127.0.0.1:8000";
+
+    // ===== MAPA =====
+    const map = L.map('map').setView([19.4326, -99.1332], 11);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, attribution: '&copy; OpenStreetMap'
+    }).addTo(map);
+
+    function colorByNivel(nivel) {
+      if (nivel === "Alto") return "#d73027";
+      if (nivel === "Medio") return "#fc8d59";
+      return "#1a9850"; // Bajo
+    }
+    function styleByProps(p) { return { color: colorByNivel(p.nivel), weight:4, opacity:0.9 }; }
+
+    async function loadData() {
+      const url = `${API}/score/geojson?hours=72&top_k=50000&bbox=-99.36,19.18,-98.94,19.59`
+                + `&tolerance_m=10&use_hazard=true&min_mm=0&only_cdmx=true&mm_ref=100`;
+      const res = await fetch(url);
+      const fc = await res.json();
+      L.geoJSON(fc, {
+        style: f => styleByProps(f.properties),
+        onEachFeature: (f, layer) => {
+          const p = f.properties;
+          layer.bindPopup(`
+            <b>${p.nombre || '(sin nombre)'}</b><br/>
+            Alcaldía: ${p.alcaldia || '-'}<br/>
+            Lluvia 72h: ${p.p72_mm?.toFixed(1)} mm<br/>
+            Hazard: ${p.hazard}<br/>
+            Score: ${p.score?.toFixed(3)} — <b>${p.nivel}</b>
+          `);
+        }
+      }).addTo(map);
+    }
+
+    const legend = L.control({position:'bottomleft'});
+    legend.onAdd = function(){
+      const div = L.DomUtil.create('div','legend');
+      div.innerHTML = `
+        <div><span class="swatch" style="background:#d73027"></span>Alto</div>
+        <div><span class="swatch" style="background:#fc8d59"></span>Medio</div>
+        <div><span class="swatch" style="background:#1a9850"></span>Bajo</div>`;
+      return div;
+    };
+    legend.addTo(map);
+
+    loadData();
+
+    // ===== CHAT =====
+    const $log  = document.getElementById('chatlog');
+    const $msg  = document.getElementById('chatmsg');
+    const $send = document.getElementById('chatsend');
+
+    function addMsg(role, text) {
+      const box = document.createElement('div');
+      box.className = `msg ${role === 'user' ? 'me' : 'ai'}`;
+      const safe = (text ?? '').toString()
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        .replace(/\n/g,'<br>');
+      box.innerHTML = `<div>${safe}</div>`;
+      $log.appendChild(box);
+      $log.scrollTop = $log.scrollHeight;
+    }
+
+    let typingEl = null;
+    function showTyping() {
+      if (typingEl) return;
+      typingEl = document.createElement('div');
+      typingEl.className = 'msg ai';
+      typingEl.innerHTML = `<div class="typing">
+        <span>Escribiendo</span>
+        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      </div>`;
+      $log.appendChild(typingEl);
+      $log.scrollTop = $log.scrollHeight;
+    }
+    function hideTyping(){ if (typingEl){ typingEl.remove(); typingEl=null; } }
+
+    async function sendChat() {
+      const q = $msg.value.trim();
+      if (!q) return;
+      addMsg('user', q);
+      $msg.value = '';
+      $msg.disabled = true; $send.disabled = true;
+      showTyping();
+      try {
+        const r = await fetch(`${API}/chat`, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ question: q })
+        });
+        const data = await r.json();
+        hideTyping();
+        addMsg('assistant', r.ok ? (data.answer || '(sin respuesta)') : '⚠️ Error al consultar la IA.');
+      } catch {
+        hideTyping();
+        addMsg('assistant','⚠️ No se pudo conectar al servidor.');
+      } finally {
+        $msg.disabled = false; $send.disabled = false; $msg.focus();
+      }
+    }
+
+    $send.addEventListener('click', sendChat);
+    $msg.addEventListener('keydown', (e)=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); sendChat(); } });
+
+    // Bienvenida
+    addMsg('assistant',
+      '¡Hola! Puedo responder sobre lluvia acumulada (p72_mm), niveles Alto/Medio/Bajo y ' +
+      'calles con mayor riesgo por alcaldía. Ejemplos:\n' +
+      '• ¿Qué tan probable es que haya inundaciones en Iztapalapa?'
+    );
+  </script>
+</body>
+</html>
