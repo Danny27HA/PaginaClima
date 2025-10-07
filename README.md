@@ -1,259 +1,145 @@
-CDMX Flood – Pronóstico, riesgo por calle y chat IA
+# CDMX Flood — Pronóstico de lluvia y riesgo por calle (72h)
+
+**CDMX Flood** es una aplicación que combina pronóstico de precipitación a 72 horas con capas geoespaciales (calles y polígonos de riesgo) para estimar un **nivel de riesgo por tramo de calle** dentro de la Ciudad de México. Incluye:
+- **API** (FastAPI + PostGIS) para ingestión de pronóstico, cálculos y consulta.
+- **Mapa web** (Leaflet) que pinta las calles por **nivel de riesgo** (Bajo/Medio/Alto).
+- **Chat asistente** que responde preguntas sobre la situación (p. ej. “calles con nivel alto en Iztapalapa”).
+
+---
+
+## ¿Qué hace la app?
+
+1. **Descarga y resume el pronóstico de lluvia** (Open-Meteo) sobre una cuadrícula que cubre CDMX.
+2. **Convierte ese pronóstico en celdas GeoJSON** (polígonos) con la lluvia acumulada a 72h (*p72_mm*).
+3. **Cruza esas celdas con la red de calles** para calcular, por cada tramo, cuánta lluvia le “cae encima”.
+4. **(Opcional) Considera polígonos de riesgo** (histórico/atlas) para elevar el score en zonas susceptibles.
+5. **Calcula un “score” de riesgo** por calle y lo clasifica como **Bajo / Medio / Alto**.
+6. **Expone endpoints** para consultar esos resultados como listas o **GeoJSON**.
+7. **Dibuja el mapa** con colores por nivel y popups con la información clave.
+8. **Permite consultas en lenguaje natural** (chat), priorizando datos del backend; si no hay datos, responde con IA.
+
+---
+
+## Cómo funciona (arquitectura)
+
+### 1) Backend (FastAPI + PostGIS)
+- **Base de datos**: PostgreSQL/PostGIS con tablas:
+  - `calles` (LineString, una por tramo).
+  - `precip_forecast` (polígonos/celdas con mm acumulados y `ts`).
+  - `flood_polygons` (opcional, zonas históricas/susceptibles).
+- **Endoints principales**:
+  - `POST /forecast/openmeteo`  
+    Descarga precipitación horaria (Open-Meteo), **suma 72h**, y guarda celdas (polígonos) con su `mm`.  
+    Parámetros clave:
+    - `bbox` (WGS84): área a cubrir.
+    - `step_deg`: tamaño de celda (p. ej. `0.04` ≈ 4 km aprox).
+    - `hours`: por defecto 72.
+    - `clear_previous`: borrar celdas previas del mismo rango temporal.
+  - `GET /forecast/summary`  
+    Resumen de cuántas celdas hay y la suma total de mm en un rango.
+  - `GET /score`  
+    Devuelve el **ranking de calles** (solo datos tabulares).
+  - `GET /score/geojson`  
+    Devuelve **FeatureCollection** con las calles y propiedades:
+    - `nombre`, `alcaldia`
+    - `p72_mm` (lluvia 72h acumulada)
+    - `hazard` (0/1)
+    - `score` y `nivel` (**Bajo/Medio/Alto**)
+    
+  Filtros y parámetros útiles:
+  - `bbox`: recorta el cálculo/consulta a un área.
+  - `tolerance_m`: buffer en metros para cruzar calles con celdas.
+  - `use_hazard`: si `true`, incorpora intersección con `flood_polygons`.
+  - `min_mm`: filtra calles con lluvia mínima.
+  - `only_cdmx`: limita resultados a CDMX (si la tabla de alcaldías está cargada).
+  - `mm_ref`: calibra qué tanto “pesa” la lluvia en el score.
+
+- **Score (idea general)**  
+  Se calcula como combinación de:
+  - **Lluvia 72h (p72_mm)**, normalizada contra `mm_ref` (ej. 80–100 mm).
+  - **Hazard** (1 si la calle toca un polígono de riesgo; 0 si no).
+  
+  El “nivel” se asigna por umbrales de `score`:
+  - **Alto** (rojo)
+  - **Medio** (naranja)
+  - **Bajo** (verde)
+
+### 2) Frontend (web/index.html + Leaflet)
+- Mapa centrado en CDMX.
+- Capa de **calles** pintada por `nivel`:
+  - **Rojo** = Alto  
+  - **Naranja** = Medio  
+  - **Verde** = Bajo
+- Pop-ups al hacer click con:
+  - Nombre de la calle
+  - Alcaldía
+  - Lluvia acumulada 72h (`p72_mm`)
+  - `hazard` y `score`
+
+La URL que consume el mapa luce así (ejemplo):
+/score/geojson?hours=72&top_k=50000&bbox=-99.36,19.18,-98.94,19.59
+&tolerance_m=10&use_hazard=true&min_mm=0&only_cdmx=true&mm_ref=100
+
+markdown
+Copiar código
+> Cambiando esos parámetros (en el script del HTML) puedes **acotar el área**, **ajustar la sensibilidad** y **filtrar**.
+
+### 3) Chat (API de IA + reglas)
+- **Router**: `POST /chat` con JSON `{ "question": "..." }`.
+- **Lógica**: intenta **resolver con datos del backend** (resumen, calles por alcaldía, promedio de p72 por alcaldía, top de riesgo por alcaldía, etc.).  
+- Si no aplica, cae a un **modelo de IA** (por OpenRouter/DeepSeek u otro).
+- En el **HTML** hay una cajita lateral para chatear, con indicador de “escribiendo…”.
+
+---
+
+## Flujo típico de uso
+
+1. **Cargar pronóstico** (una sola vez al arrancar o manual):  
+   `POST /forecast/openmeteo` con `bbox` de CDMX, `hours=72`, `step_deg` y `clear_previous=true`.
+2. **Explorar en el mapa**: abrir `web/index.html` en el navegador.  
+   (El mapa consulta `/score/geojson` y pinta las calles).
+3. **Consultar por API o chat**:  
+   - `GET /forecast/summary` para resumen 72h.  
+   - `GET /score` para tabla de top calles.  
+   - Chat: “Calles con nivel alto en X alcaldía”, “Promedio p72 en X”, “Top alcaldías con mayor riesgo”, etc.
 
-Mapa interactivo para visualizar riesgo de inundación por tramo de calle en la CDMX a 72 h, usando:
+---
 
-FastAPI (backend)
+## Qué significan las métricas
 
-PostgreSQL + PostGIS (geodatos)
+- **p72_mm**: precipitación acumulada (en **milímetros**) prevista para las **próximas 72 horas** en el entorno de una calle.
+- **hazard**: 1 si la calle intersecta un polígono de riesgo (cuando `use_hazard=true`), 0 si no.
+- **score**: combinación de p72_mm (normalizada con `mm_ref`) y `hazard`.
+- **nivel**:
+  - **Bajo** (verde), **Medio** (naranja), **Alto** (rojo) — según umbrales de `score`.
 
-Leaflet (frontend)
+---
 
-Open-Meteo (pronóstico gratuito)
+## Decisiones de diseño
 
-OpenRouter (DeepSeek free) para chat IA opcional
+- **PostGIS** para todos los cruces espaciales eficientes (índices, buffers, intersecciones).
+- **Cálculo por “último pronóstico”**: los endpoints de score usan la corrida más reciente para respuestas rápidas y consistentes.
+- **Parámetros abiertos** (`mm_ref`, `tolerance_m`, `min_mm`, `bbox`) para adaptar la sensibilidad y el área.
 
-Proyecto educativo. No usar para emergencias reales.
+---
 
-Demo local (resumen rápido)
+## Limitaciones conocidas
 
-Clona y entra al proyecto:
+- La calidad del resultado depende del **pronóstico** (Open-Meteo) y de la **granularidad** (`step_deg`).
+- `flood_polygons` es opcional; si está vacío, `hazard` aporta 0 (y todo depende de la lluvia).
+- El **chat** no es un sistema de emergencias; las respuestas son orientativas.
 
-git clone https://github.com/Danny27HA/PaginaClima.git
-cd PaginaClima
+---
 
+## Aviso y uso responsable
 
-Crea y activa entorno Python:
+Este proyecto es con fines **educativos**. No sustituye información oficial ni alertas de **Protección Civil**. Para decisiones críticas, consulta fuentes oficiales (SACMEX, SGIRPC, CONAGUA).
 
-# Windows (PowerShell)
-python -m venv api\.venv
-api\.venv\Scripts\activate
+---
 
-# macOS/Linux
-python3 -m venv api/.venv
-source api/.venv/bin/activate
+## Créditos
 
-
-Instala dependencias:
-
-pip install -r requirements.txt
-
-
-Crea base de datos (PostgreSQL + PostGIS) y variables de entorno (ver secciones abajo).
-Copia .env.example a .env y edítalo.
-
-Levanta el backend:
-
-cd api
-uvicorn api.main:app --reload
-
-
-Abre la documentación: http://127.0.0.1:8000/docs
-
-Carga pronóstico de prueba (en /docs → POST /forecast/openmeteo):
-
-{
-  "bbox": "-99.36,19.18,-98.94,19.59",
-  "step_deg": 0.04,
-  "hours": 72,
-  "clear_previous": true
-}
-
-
-Sirve el frontend (mapa):
-
-# desde la carpeta raíz
-cd web
-python -m http.server 8080
-
-
-Abre: http://127.0.0.1:8080
-
-Requisitos
-
-Python 3.10+
-
-PostgreSQL 14+ con PostGIS
-
-Git
-
-(Opcional) VS Code con extensión Python
-
-(Opcional) Clave OpenRouter para el chat IA
-
-Configuración de la base de datos
-
-Instala PostgreSQL + PostGIS.
-
-Crea usuario y base:
-
--- En psql como superusuario (postgres)
-CREATE USER flooduser WITH PASSWORD '1234' LOGIN;
-CREATE DATABASE flooddb OWNER flooduser;
-\c flooddb
-CREATE EXTENSION IF NOT EXISTS postgis;
-
-
-Crea tablas mínimas (si no existen). Entra a psql con tu usuario:
-
-psql -U flooduser -h 127.0.0.1 -d flooddb
-
-
-Luego ejecuta (si ya corriste el backend una vez, esto lo crea automáticamente desde db/init.sql; si no, puedes usar este esquema básico):
-
--- Calles (líneas)
-CREATE TABLE IF NOT EXISTS calles (
-  id SERIAL PRIMARY KEY,
-  nombre TEXT,
-  alcaldia TEXT,
-  geom geometry(LineString,4326)
-);
-CREATE INDEX IF NOT EXISTS idx_calles_geom ON calles USING GIST (geom);
-
--- Pronóstico (polígonos/celdas)
-CREATE TABLE IF NOT EXISTS precip_forecast (
-  id SERIAL PRIMARY KEY,
-  ts timestamp without time zone NOT NULL,
-  mm double precision NOT NULL,
-  geom geometry(Polygon,4326) NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_precip_geom ON precip_forecast USING GIST (geom);
-CREATE INDEX IF NOT EXISTS idx_precip_ts   ON precip_forecast (ts);
-
--- Polígonos de riesgo (opcional, puedes dejarlo vacío)
-CREATE TABLE IF NOT EXISTS flood_polygons (
-  id SERIAL PRIMARY KEY,
-  fuente TEXT,
-  fecha date,
-  geom geometry(MultiPolygon,4326)
-);
-CREATE INDEX IF NOT EXISTS idx_flood_geom ON flood_polygons USING GIST (geom);
-
--- Alcaldías (opcional para etiquetar)
-CREATE TABLE IF NOT EXISTS alcaldias (
-  id SERIAL PRIMARY KEY,
-  nombre TEXT,
-  geom geometry(MultiPolygon,4326)
-);
-CREATE INDEX IF NOT EXISTS idx_alcaldias_geom ON alcaldias USING GIST (geom);
-
-
-Calles: puedes cargar OpenStreetMap por batch o empezar con unas líneas de prueba.
-flood_polygons: si no tienes datos oficiales, el sistema sigue funcionando (hazard=0).
-alcaldias: si cargas polígonos oficiales, el backend etiqueta mejor.
-
-Variables de entorno
-
-Crea un archivo .env en la carpeta api/ (o raíz si prefieres) con:
-
-POSTGRES_URL=postgresql+psycopg://flooduser:1234@127.0.0.1:5432/flooddb
-APP_ENV=dev
-API_BASE_URL=http://127.0.0.1:8000
-
-# Para IA (opcional, si quieres chat)
-OPENROUTER_API_KEY=sk-or-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
-
-
-No subas tu API key al repo público.
-
-Ejecutar backend
-
-Desde la raíz o api/ con el venv activo:
-
-uvicorn api.main:app --reload
-
-
-Docs: http://127.0.0.1:8000/docs
-
-Endpoints clave:
-
-GET /system/db – estado de conexión a DB
-
-POST /forecast – carga manual de celdas (GeoJSON + mm)
-
-POST /forecast/openmeteo – descarga/suma y guarda rejilla 72 h
-
-GET /forecast/summary – resumen ventana 72 h
-
-GET /score – ranking por calle (JSON)
-
-GET /score/geojson – ranking por calle (GeoJSON; se usa en el mapa)
-
-POST /chat – chat IA con intents (usa datos del backend cuando corresponde)
-
-Parámetros útiles en /score y /score/geojson
-
-top_k — número de tramos a devolver (ej. 3000 o 5000)
-
-bbox — recorte espacial minx,miny,maxx,maxy (WGS84)
-
-tolerance_m — buffer en metros para cruzar líneas ↔ celdas
-
-use_hazard — usa/no usa polígonos de riesgo (si no tienes datos: false)
-
-min_mm — filtra calles con lluvia acumulada mínima
-
-only_cdmx — si está implementado, limita a alcaldías CDMX (true/false)
-
-mm_ref — referencia de mm para el score (normalización)
-
-Frontend (Leaflet)
-
-El mapa está en web/index.html. Para evitar problemas de CORS, sírvelo con un servidor local:
-
-cd web
-python -m http.server 8080
-
-
-Abre: http://127.0.0.1:8080
-
-El archivo ya trae:
-
-leyenda de colores (Alto/Medio/Bajo),
-
-llamadas a /score/geojson con parámetros,
-
-cajón de chat a la derecha (usa /chat).
-
-Si cambias parámetros (ej. only_cdmx=true, mm_ref=100), edita el fetch(...) dentro de index.html.
-
-Chat IA (OpenRouter / DeepSeek)
-
-El endpoint es POST /chat y trata de resolver primero con datos locales (intents):
-
-“reporte 72h / resumen”
-
-“calles con nivel alto/medio/bajo en <alcaldía>”
-
-“lluvia/p72 en <alcaldía>”
-
-Si no hay intent que aplique, hace fallback a OpenRouter (DeepSeek free) si has puesto OPENROUTER_API_KEY.
-
-Preguntas de ejemplo:
-
-“reporte 72h”
-
-“calles con nivel alto en Iztapalapa”
-
-“lluvia acumulada en Gustavo A. Madero”
-
-“top 3 alcaldías con mayor riesgo”
-
-“¿qué significa p72_mm?”
-
-Flujo típico (local)
-
-Levanta el backend (uvicorn).
-
-Carga un pronóstico en /docs → POST /forecast/openmeteo:
-
-{
-  "bbox": "-99.36,19.18,-98.94,19.59",
-  "step_deg": 0.04,
-  "hours": 72,
-  "clear_previous": true
-}
-
-
-Abre el mapa en web/index.html (sirve en 8080).
-
-Usa el chat (preguntas con intents) o consume endpoints.
+- API y cálculo: **FastAPI + SQLAlchemy + PostGIS**  
+- Mapa: **Leaflet + OpenStreetMap**  
+- Pronóstico: **Open-Meteo**  
+- Chat: **OpenRouter / DeepSeek** (o el proveedor gratuito configurado)
