@@ -1,0 +1,43 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: cdmx-flood-db
+    environment:
+      POSTGRES_DB: flooddb
+      POSTGRES_USER: flooduser
+      POSTGRES_PASSWORD: 1234
+    ports:
+      - "5432:5432"
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flooduser -d flooddb"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: cdmx-flood-api
+    environment:
+      # El API apunta a la DB del servicio "db"
+      POSTGRES_URL: postgresql+psycopg://flooduser:1234@db:5432/flooddb
+      APP_ENV: prod
+      API_BASE_URL: http://localhost:8000
+      # Si usas OpenRouter/Deepseek, exporta fuera: OPENROUTER_API_KEY=...
+      # OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./:/app
+    command: >
+      sh -c "uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload"
+
+volumes:
+  dbdata:
