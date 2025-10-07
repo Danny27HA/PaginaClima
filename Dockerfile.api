@@ -1,0 +1,21 @@
+FROM python:3.13-slim
+
+# Dependencias de compilación y cliente de Postgres
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential gcc libpq-dev curl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copiamos requirements primero para aprovechar cache
+COPY api/requirements.txt /app/api/requirements.txt
+RUN pip install --no-cache-dir -r /app/api/requirements.txt
+
+# Copiamos todo el proyecto
+COPY . /app
+
+# Exponemos puerto de FastAPI
+EXPOSE 8000
+
+# Arranque por defecto (override en compose)
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
